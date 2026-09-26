@@ -334,6 +334,22 @@ GetKey.TextXAlignment = Enum.TextXAlignment.Left
 
 GetKey.Parent = Body
 
+local ClearKey = Instance.new("TextButton")
+
+ClearKey.Position = UDim2.fromOffset(115, 170)
+ClearKey.Size = UDim2.fromOffset(110, 30)
+
+ClearKey.BackgroundTransparency = 1
+ClearKey.AutoButtonColor = false
+
+ClearKey.Font = Enum.Font.GothamMedium
+ClearKey.Text = "Clear Key"
+ClearKey.TextSize = 13
+ClearKey.TextColor3 = Color3.fromRGB(175, 175, 181)
+ClearKey.TextXAlignment = Enum.TextXAlignment.Left
+
+ClearKey.Parent = Body
+
 local Discord = Instance.new("TextButton")
 
 Discord.AnchorPoint = Vector2.new(1, 0)
@@ -617,6 +633,21 @@ GetKey.MouseButton1Click:Connect(function()
     end
 end)
 
+ClearKey.MouseButton1Click:Connect(function()
+
+    deleteSavedKey()
+
+    ENV.SCRIPT_KEY = nil
+
+    KeyBox.Text = ""
+
+    setStatus(
+        "Saved key cleared.",
+        "success"
+    )
+end)
+
+
 Discord.MouseButton1Click:Connect(function()
     if CONFIG.Discord == "PUT_YOUR_DISCORD_INVITE_HERE" then
         setStatus("Discord not configured yet.", "error")
@@ -743,7 +774,7 @@ TweenService:Create(
 ):Play()
 
 --========================================================
--- AUTO LOGIN
+-- SAVED KEY
 --========================================================
 
 local savedKey = readSavedKey()
@@ -751,13 +782,10 @@ local savedKey = readSavedKey()
 if savedKey then
     KeyBox.Text = savedKey
 
-    setStatus("Checking saved license...", "loading")
-
-    task.delay(0.25, function()
-        if not destroyed then
-            authenticate()
-        end
-    end)
+    setStatus(
+        "Saved key loaded. Press Authenticate.",
+        "idle"
+    )
 else
     setStatus("Ready", "idle")
 end
