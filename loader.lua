@@ -19,7 +19,7 @@ local CONFIG = {
 
     ScriptURL = "https://api.jnkie.com/api/v1/luascripts/public/70f3ededa6365a2f4d8396f07ca841c36b430d61f0e5d5296395e842c99b2abb/download",
 
-    Discord = "PUT_YOUR_DISCORD_INVITE_HERE",
+    Discord = "https://discord.gg/reaperlol",
 
     Folder = "reaper",
     KeyFile = "reaper/key.txt",
