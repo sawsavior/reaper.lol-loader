@@ -13,7 +13,7 @@ local LocalPlayer = Players.LocalPlayer
 
 local CONFIG = {
     Name = "reaper.lol",
-    Version = "1.2.0",
+    Version = "1.4.0",
 
     GetKeyURL = "https://jnkie.com/get-key/reaperlol",
 
@@ -624,45 +624,63 @@ end
 --
 -- On executors without setfenv/getfenv, fall back to a very short-lived
 -- global assignment and restore whatever values were there before.
+local function acquireScriptKeyLock()
+    -- JNKIE reads SCRIPT_KEY from the shared executor environment.
+    -- Serialize this tiny launch window so simultaneous autoexecs cannot
+    -- overwrite the key while Reaper is authenticating.
+    local token = {}
+
+    while ENV.__REAPER_SCRIPT_KEY_LOCK
+        and ENV.__REAPER_SCRIPT_KEY_LOCK ~= token
+    do
+        task.wait()
+    end
+
+    ENV.__REAPER_SCRIPT_KEY_LOCK = token
+    return token
+end
+
+local function releaseScriptKeyLock(token)
+    if ENV.__REAPER_SCRIPT_KEY_LOCK == token then
+        ENV.__REAPER_SCRIPT_KEY_LOCK = nil
+    end
+end
+
 local function executeProtectedSource(source, key)
-    local compiled, compileError = loadstring(source)
+    local lockToken = acquireScriptKeyLock()
 
-    if not compiled then
-        error(compileError or "Unable to compile script")
-    end
-
-    if setfenv and getfenv then
-        local baseEnv = getfenv(compiled)
-        local scopedEnv = {
-            SCRIPT_KEY = key,
-            script_key = key,
-        }
-
-        setmetatable(scopedEnv, {
-            __index = baseEnv,
-            __newindex = baseEnv,
-        })
-
-        setfenv(compiled, scopedEnv)
-        return compiled()
-    end
-
+    -- Preserve whatever another script had in these shared globals.
     local oldEnvUpper = ENV.SCRIPT_KEY
     local oldEnvLower = ENV.script_key
     local oldGUpper = _G.SCRIPT_KEY
     local oldGLower = _G.script_key
 
+    -- IMPORTANT:
+    -- JNKIE must see SCRIPT_KEY BEFORE loadstring(source) is created.
+    -- The original working loader did this ordering as well.
     ENV.SCRIPT_KEY = key
     ENV.script_key = key
     _G.SCRIPT_KEY = key
     _G.script_key = key
 
-    local ok, result = pcall(compiled)
+    local ok, result = pcall(function()
+        local compiled, compileError = loadstring(source)
 
+        if not compiled then
+            error(compileError or "Unable to compile script")
+        end
+
+        return compiled()
+    end)
+
+    -- Restore previous shared values immediately after the protected payload
+    -- returns/errors so Reaper does not permanently own SCRIPT_KEY.
     ENV.SCRIPT_KEY = oldEnvUpper
     ENV.script_key = oldEnvLower
     _G.SCRIPT_KEY = oldGUpper
     _G.script_key = oldGLower
+
+    releaseScriptKeyLock(lockToken)
 
     if not ok then
         error(result, 0)
@@ -670,6 +688,7 @@ local function executeProtectedSource(source, key)
 
     return result
 end
+
 
 local function describeRejectedKey(reason)
     local message = string.lower(tostring(reason or ""))
