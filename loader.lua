@@ -13,7 +13,7 @@ local LocalPlayer = Players.LocalPlayer
 
 local CONFIG = {
     Name = "reaper.lol",
-    Version = "1.4.0",
+    Version = "1.5.0",
 
     GetKeyURL = "https://jnkie.com/get-key/reaperlol",
 
@@ -624,72 +624,6 @@ end
 --
 -- On executors without setfenv/getfenv, fall back to a very short-lived
 -- global assignment and restore whatever values were there before.
-local function acquireScriptKeyLock()
-    -- JNKIE reads SCRIPT_KEY from the shared executor environment.
-    -- Serialize this tiny launch window so simultaneous autoexecs cannot
-    -- overwrite the key while Reaper is authenticating.
-    local token = {}
-
-    while ENV.__REAPER_SCRIPT_KEY_LOCK
-        and ENV.__REAPER_SCRIPT_KEY_LOCK ~= token
-    do
-        task.wait()
-    end
-
-    ENV.__REAPER_SCRIPT_KEY_LOCK = token
-    return token
-end
-
-local function releaseScriptKeyLock(token)
-    if ENV.__REAPER_SCRIPT_KEY_LOCK == token then
-        ENV.__REAPER_SCRIPT_KEY_LOCK = nil
-    end
-end
-
-local function executeProtectedSource(source, key)
-    local lockToken = acquireScriptKeyLock()
-
-    -- Preserve whatever another script had in these shared globals.
-    local oldEnvUpper = ENV.SCRIPT_KEY
-    local oldEnvLower = ENV.script_key
-    local oldGUpper = _G.SCRIPT_KEY
-    local oldGLower = _G.script_key
-
-    -- IMPORTANT:
-    -- JNKIE must see SCRIPT_KEY BEFORE loadstring(source) is created.
-    -- The original working loader did this ordering as well.
-    ENV.SCRIPT_KEY = key
-    ENV.script_key = key
-    _G.SCRIPT_KEY = key
-    _G.script_key = key
-
-    local ok, result = pcall(function()
-        local compiled, compileError = loadstring(source)
-
-        if not compiled then
-            error(compileError or "Unable to compile script")
-        end
-
-        return compiled()
-    end)
-
-    -- Restore previous shared values immediately after the protected payload
-    -- returns/errors so Reaper does not permanently own SCRIPT_KEY.
-    ENV.SCRIPT_KEY = oldEnvUpper
-    ENV.script_key = oldEnvLower
-    _G.SCRIPT_KEY = oldGUpper
-    _G.script_key = oldGLower
-
-    releaseScriptKeyLock(lockToken)
-
-    if not ok then
-        error(result, 0)
-    end
-
-    return result
-end
-
-
 local function describeRejectedKey(reason)
     local message = string.lower(tostring(reason or ""))
 
@@ -738,17 +672,27 @@ local function launchProtectedScript(key, sourceKind)
     end
 
     setStatus("Checking license...", "loading")
+
+    -- IMPORTANT: keep the JNKIE handoff identical to the original working
+    -- loader. JNKIE expects SCRIPT_KEY in the executor's shared environment.
+    ENV.SCRIPT_KEY = key
+
     beginKickGuard()
 
     local ok, result = pcall(function()
         local source = game:HttpGet(CONFIG.ScriptURL)
-        return executeProtectedSource(source, key)
+
+        local compiled, compileError = loadstring(source)
+
+        if not compiled then
+            error(compileError or "Unable to compile script")
+        end
+
+        return compiled()
     end)
 
     endKickGuard()
 
-    -- The protected script attempted to kick during authentication. The guard
-    -- stopped the disconnect and aborted execution before anything continued.
     if KickGuard.blocked then
         local reason = KickGuard.reason
 
@@ -775,10 +719,8 @@ local function launchProtectedScript(key, sourceKind)
         return false
     end
 
-    -- Only a completed authentication attempt is remembered.
+    -- Successful authentication = remember automatically.
     saveKey(key)
-
-    -- Once saved, the external provided key is no longer needed.
     clearReaperProvidedKey()
 
     setStatus("Authenticated. Loading...", "success")
