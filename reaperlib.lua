@@ -7439,6 +7439,5 @@ local Library do
 end
 
 
-Window:Init()
 getgenv().Library = Library
 return Library
