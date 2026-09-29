@@ -13,7 +13,7 @@ local LocalPlayer = Players.LocalPlayer
 
 local CONFIG = {
     Name = "reaper.lol",
-    Version = "1.1.0",
+    Version = "1.2.0",
 
     GetKeyURL = "https://jnkie.com/get-key/reaperlol",
 
@@ -31,11 +31,23 @@ local CONFIG = {
 
 local ENV = getgenv and getgenv() or _G
 
--- Accept either of these before running the loader:
---   script_key = "YOUR_KEY"
---   SCRIPT_KEY = "YOUR_KEY"
--- `SCRIPT_KEY` remains the canonical value passed to the protected script.
-local providedKey = ENV.script_key or ENV.SCRIPT_KEY or _G.script_key or _G.SCRIPT_KEY or script_key or SCRIPT_KEY
+-- Reaper uses its own namespace so other autoexec scripts can safely use
+-- their own key variables without colliding with this loader.
+--
+-- Recommended:
+--   getgenv().REAPER = getgenv().REAPER or {}
+--   getgenv().REAPER.key = "YOUR_KEY"
+--
+-- Optional shorthand:
+--   getgenv().REAPER_KEY = "YOUR_KEY"
+local REAPER = ENV.REAPER
+
+if type(REAPER) ~= "table" then
+    REAPER = {}
+    ENV.REAPER = REAPER
+end
+
+local providedKey = REAPER.key or ENV.REAPER_KEY
 
 if ENV.__REAPER_LOADER_CLEANUP then
     pcall(ENV.__REAPER_LOADER_CLEANUP)
@@ -601,11 +613,62 @@ local function looksLikeInvalidKeyError(err)
         or message:find("rejected", 1, true)
 end
 
-local function clearRuntimeKey()
-    ENV.SCRIPT_KEY = nil
-    ENV.script_key = nil
-    _G.SCRIPT_KEY = nil
-    _G.script_key = nil
+local function clearReaperProvidedKey()
+    REAPER.key = nil
+    ENV.REAPER_KEY = nil
+end
+
+-- Execute the protected payload with a Reaper-only SCRIPT_KEY environment.
+-- If setfenv/getfenv are available, SCRIPT_KEY never needs to be placed in
+-- the shared executor global environment at all.
+--
+-- On executors without setfenv/getfenv, fall back to a very short-lived
+-- global assignment and restore whatever values were there before.
+local function executeProtectedSource(source, key)
+    local compiled, compileError = loadstring(source)
+
+    if not compiled then
+        error(compileError or "Unable to compile script")
+    end
+
+    if setfenv and getfenv then
+        local baseEnv = getfenv(compiled)
+        local scopedEnv = {
+            SCRIPT_KEY = key,
+            script_key = key,
+        }
+
+        setmetatable(scopedEnv, {
+            __index = baseEnv,
+            __newindex = baseEnv,
+        })
+
+        setfenv(compiled, scopedEnv)
+        return compiled()
+    end
+
+    local oldEnvUpper = ENV.SCRIPT_KEY
+    local oldEnvLower = ENV.script_key
+    local oldGUpper = _G.SCRIPT_KEY
+    local oldGLower = _G.script_key
+
+    ENV.SCRIPT_KEY = key
+    ENV.script_key = key
+    _G.SCRIPT_KEY = key
+    _G.script_key = key
+
+    local ok, result = pcall(compiled)
+
+    ENV.SCRIPT_KEY = oldEnvUpper
+    ENV.script_key = oldEnvLower
+    _G.SCRIPT_KEY = oldGUpper
+    _G.script_key = oldGLower
+
+    if not ok then
+        error(result, 0)
+    end
+
+    return result
 end
 
 local function describeRejectedKey(reason)
@@ -631,7 +694,7 @@ end
 
 local function handleRejectedKey(key, sourceKind, reason)
     setBusy(false)
-    clearRuntimeKey()
+    clearReaperProvidedKey()
 
     -- A remembered key that is rejected should never be retried forever on
     -- every execution. Remove it and return the user to the key screen.
@@ -656,25 +719,11 @@ local function launchProtectedScript(key, sourceKind)
     end
 
     setStatus("Checking license...", "loading")
-
-    -- JNKIE's generated script looks for uppercase SCRIPT_KEY.
-    ENV.SCRIPT_KEY = key
-    ENV.script_key = key
-    _G.SCRIPT_KEY = key
-    _G.script_key = key
-
     beginKickGuard()
 
     local ok, result = pcall(function()
         local source = game:HttpGet(CONFIG.ScriptURL)
-
-        local compiled, compileError = loadstring(source)
-
-        if not compiled then
-            error(compileError or "Unable to compile script")
-        end
-
-        return compiled()
+        return executeProtectedSource(source, key)
     end)
 
     endKickGuard()
@@ -700,8 +749,6 @@ local function launchProtectedScript(key, sourceKind)
         if looksLikeInvalidKeyError(result) then
             handleRejectedKey(key, sourceKind, result)
         else
-            -- Do not leave a failed/stale key in the runtime environment.
-            clearRuntimeKey()
             KeyBox.Text = key
             setStatus("Unable to verify license. Try again.", "error")
         end
@@ -711,6 +758,9 @@ local function launchProtectedScript(key, sourceKind)
 
     -- Only a completed authentication attempt is remembered.
     saveKey(key)
+
+    -- Once saved, the external provided key is no longer needed.
+    clearReaperProvidedKey()
 
     setStatus("Authenticated. Loading...", "success")
 
@@ -792,10 +842,7 @@ ClearKey.MouseButton1Click:Connect(function()
 
     deleteSavedKey()
 
-    ENV.SCRIPT_KEY = nil
-    ENV.script_key = nil
-    _G.SCRIPT_KEY = nil
-    _G.script_key = nil
+    clearReaperProvidedKey()
 
     KeyBox.Text = ""
 
@@ -939,8 +986,8 @@ providedKey = trim(providedKey)
 local savedKey = readSavedKey()
 
 -- Priority:
---   1. key supplied alongside the loader
---   2. remembered key
+--   1. Reaper-specific key supplied alongside the loader
+--   2. remembered Reaper key
 --   3. normal manual key UI
 if providedKey ~= "" then
     KeyBox.Text = providedKey
