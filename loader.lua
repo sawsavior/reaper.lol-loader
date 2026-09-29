@@ -31,6 +31,12 @@ local CONFIG = {
 
 local ENV = getgenv and getgenv() or _G
 
+-- Accept either of these before running the loader:
+--   script_key = "YOUR_KEY"
+--   SCRIPT_KEY = "YOUR_KEY"
+-- `SCRIPT_KEY` remains the canonical value passed to the protected script.
+local providedKey = ENV.script_key or ENV.SCRIPT_KEY or _G.script_key or _G.SCRIPT_KEY or script_key or SCRIPT_KEY
+
 if ENV.__REAPER_LOADER_CLEANUP then
     pcall(ENV.__REAPER_LOADER_CLEANUP)
 end
@@ -517,19 +523,34 @@ ENV.__REAPER_LOADER_CLEANUP = destroyLoader
 -- LAUNCH JNKIE SCRIPT
 --========================================================
 
-local function launchProtectedScript(key)
+local function looksLikeInvalidKeyError(err)
+    local message = string.lower(tostring(err or ""))
+
+    return message:find("expired", 1, true)
+        or message:find("invalid key", 1, true)
+        or message:find("invalid license", 1, true)
+        or message:find("license invalid", 1, true)
+        or message:find("unauthorized", 1, true)
+        or message:find("key invalid", 1, true)
+        or message:find("key expired", 1, true)
+end
+
+local function launchProtectedScript(key, sourceKind)
     key = trim(key)
 
     if key == "" then
         setBusy(false)
         setStatus("Enter a license key.", "error")
-        return
+        return false
     end
 
     setStatus("Checking license...", "loading")
 
-    -- JNKIE's generated script looks for this.
+    -- JNKIE's generated script looks for uppercase SCRIPT_KEY.
     ENV.SCRIPT_KEY = key
+    ENV.script_key = key
+    _G.SCRIPT_KEY = key
+    _G.script_key = key
 
     local ok, result = pcall(function()
         local source = game:HttpGet(CONFIG.ScriptURL)
@@ -545,37 +566,45 @@ local function launchProtectedScript(key)
 
     if not ok then
         setBusy(false)
-
         warn("[reaper.lol]", result)
 
-        setStatus(
-            "License rejected or service unavailable.",
-            "error"
-        )
+        -- Never kick or close the loader because authentication failed.
+        if sourceKind == "saved" and looksLikeInvalidKeyError(result) then
+            deleteSavedKey()
+            KeyBox.Text = ""
+            setStatus("Saved key expired or is invalid. Enter a new key.", "error")
+        elseif sourceKind == "provided" and looksLikeInvalidKeyError(result) then
+            KeyBox.Text = key
+            setStatus("Provided key expired or is invalid.", "error")
+        else
+            KeyBox.Text = key
+            setStatus("License rejected or service unavailable.", "error")
+        end
 
-        return
+        return false
     end
 
-    -- Script successfully executed.
+    -- Successful authentication = remember automatically.
     saveKey(key)
 
-    setStatus("Authenticated.", "success")
+    setStatus("Authenticated. Key remembered.", "success")
 
     task.wait(0.2)
-
     destroyLoader()
+
+    return true
 end
 
 --========================================================
 -- AUTH
 --========================================================
 
-local function authenticate()
+local function authenticate(keyOverride, sourceKind)
     if busy or destroyed then
         return
     end
 
-    local key = trim(KeyBox.Text)
+    local key = trim(keyOverride or KeyBox.Text)
 
     if key == "" then
         setStatus("Enter a license key.", "error")
@@ -603,10 +632,11 @@ local function authenticate()
         return
     end
 
+    KeyBox.Text = key
     setBusy(true)
 
     task.spawn(function()
-        launchProtectedScript(key)
+        launchProtectedScript(key, sourceKind or "manual")
     end)
 end
 
@@ -638,6 +668,9 @@ ClearKey.MouseButton1Click:Connect(function()
     deleteSavedKey()
 
     ENV.SCRIPT_KEY = nil
+    ENV.script_key = nil
+    _G.SCRIPT_KEY = nil
+    _G.script_key = nil
 
     KeyBox.Text = ""
 
@@ -774,18 +807,30 @@ TweenService:Create(
 ):Play()
 
 --========================================================
--- SAVED KEY
+-- AUTO KEY / SAVED KEY
 --========================================================
 
+providedKey = trim(providedKey)
 local savedKey = readSavedKey()
 
-if savedKey then
-    KeyBox.Text = savedKey
+-- Priority:
+--   1. key supplied alongside the loader
+--   2. remembered key
+--   3. normal manual key UI
+if providedKey ~= "" then
+    KeyBox.Text = providedKey
+    setStatus("Provided key detected. Verifying...", "loading")
 
-    setStatus(
-        "Saved key loaded. Press Authenticate.",
-        "idle"
-    )
+    task.defer(function()
+        authenticate(providedKey, "provided")
+    end)
+elseif savedKey then
+    KeyBox.Text = savedKey
+    setStatus("Saved key found. Verifying...", "loading")
+
+    task.defer(function()
+        authenticate(savedKey, "saved")
+    end)
 else
     setStatus("Ready", "idle")
 end
