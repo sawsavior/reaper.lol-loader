@@ -13,7 +13,7 @@ local LocalPlayer = Players.LocalPlayer
 
 local CONFIG = {
     Name = "reaper.lol",
-    Version = "1.0.0",
+    Version = "1.1.0",
 
     GetKeyURL = "https://jnkie.com/get-key/reaperlol",
 
@@ -520,6 +520,71 @@ end
 ENV.__REAPER_LOADER_CLEANUP = destroyLoader
 
 --========================================================
+-- AUTH KICK GUARD
+--========================================================
+
+-- JNKIE's protected payload may call LocalPlayer:Kick() when a key is
+-- expired/invalid. During authentication only, block that kick and abort
+-- the attempt so the loader can recover cleanly instead of disconnecting.
+--
+-- The hook is installed once and remains inert outside authentication.
+local KickGuard = ENV.__REAPER_KICK_GUARD
+
+if type(KickGuard) ~= "table" then
+    KickGuard = {
+        active = false,
+        blocked = false,
+        reason = nil,
+        supported = false,
+    }
+
+    ENV.__REAPER_KICK_GUARD = KickGuard
+end
+
+if not ENV.__REAPER_KICK_GUARD_HOOKED
+    and hookmetamethod
+    and getnamecallmethod
+    and newcclosure
+then
+    local oldNamecall
+
+    oldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+        local method = getnamecallmethod()
+
+        if KickGuard.active
+            and self == LocalPlayer
+            and method == "Kick"
+        then
+            local args = {...}
+
+            KickGuard.blocked = true
+            KickGuard.reason = tostring(args[1] or "Authentication rejected")
+
+            -- Abort the protected payload immediately. pcall() around the
+            -- payload catches this sentinel and returns control to the loader.
+            error("__REAPER_AUTH_KICK_BLOCKED__", 0)
+        end
+
+        return oldNamecall(self, ...)
+    end))
+
+    KickGuard.supported = true
+    ENV.__REAPER_KICK_GUARD_HOOKED = true
+elseif ENV.__REAPER_KICK_GUARD_HOOKED then
+    KickGuard.supported = true
+end
+
+local function beginKickGuard()
+    KickGuard.blocked = false
+    KickGuard.reason = nil
+    KickGuard.active = KickGuard.supported
+end
+
+local function endKickGuard()
+    KickGuard.active = false
+end
+
+--========================================================
 -- LAUNCH JNKIE SCRIPT
 --========================================================
 
@@ -533,6 +598,52 @@ local function looksLikeInvalidKeyError(err)
         or message:find("unauthorized", 1, true)
         or message:find("key invalid", 1, true)
         or message:find("key expired", 1, true)
+        or message:find("rejected", 1, true)
+end
+
+local function clearRuntimeKey()
+    ENV.SCRIPT_KEY = nil
+    ENV.script_key = nil
+    _G.SCRIPT_KEY = nil
+    _G.script_key = nil
+end
+
+local function describeRejectedKey(reason)
+    local message = string.lower(tostring(reason or ""))
+
+    if message:find("expired", 1, true) then
+        return "Key expired. Enter a new key."
+    end
+
+    if message:find("hwid", 1, true) then
+        return "Key rejected for this device."
+    end
+
+    if message:find("invalid", 1, true)
+        or message:find("unauthorized", 1, true)
+        or message:find("rejected", 1, true)
+    then
+        return "Invalid key. Enter a new key."
+    end
+
+    return "License rejected. Enter a new key."
+end
+
+local function handleRejectedKey(key, sourceKind, reason)
+    setBusy(false)
+    clearRuntimeKey()
+
+    -- A remembered key that is rejected should never be retried forever on
+    -- every execution. Remove it and return the user to the key screen.
+    if sourceKind == "saved" then
+        deleteSavedKey()
+        KeyBox.Text = ""
+    else
+        -- Keep manually/provided keys visible so they can be corrected/copied.
+        KeyBox.Text = key
+    end
+
+    setStatus(describeRejectedKey(reason), "error")
 end
 
 local function launchProtectedScript(key, sourceKind)
@@ -552,6 +663,8 @@ local function launchProtectedScript(key, sourceKind)
     _G.SCRIPT_KEY = key
     _G.script_key = key
 
+    beginKickGuard()
+
     local ok, result = pcall(function()
         local source = game:HttpGet(CONFIG.ScriptURL)
 
@@ -564,32 +677,44 @@ local function launchProtectedScript(key, sourceKind)
         return compiled()
     end)
 
+    endKickGuard()
+
+    -- The protected script attempted to kick during authentication. The guard
+    -- stopped the disconnect and aborted execution before anything continued.
+    if KickGuard.blocked then
+        local reason = KickGuard.reason
+
+        KickGuard.blocked = false
+        KickGuard.reason = nil
+
+        warn("[reaper.lol] Authentication rejected:", reason)
+        handleRejectedKey(key, sourceKind, reason)
+
+        return false
+    end
+
     if not ok then
         setBusy(false)
         warn("[reaper.lol]", result)
 
-        -- Never kick or close the loader because authentication failed.
-        if sourceKind == "saved" and looksLikeInvalidKeyError(result) then
-            deleteSavedKey()
-            KeyBox.Text = ""
-            setStatus("Saved key expired or is invalid. Enter a new key.", "error")
-        elseif sourceKind == "provided" and looksLikeInvalidKeyError(result) then
-            KeyBox.Text = key
-            setStatus("Provided key expired or is invalid.", "error")
+        if looksLikeInvalidKeyError(result) then
+            handleRejectedKey(key, sourceKind, result)
         else
+            -- Do not leave a failed/stale key in the runtime environment.
+            clearRuntimeKey()
             KeyBox.Text = key
-            setStatus("License rejected or service unavailable.", "error")
+            setStatus("Unable to verify license. Try again.", "error")
         end
 
         return false
     end
 
-    -- Successful authentication = remember automatically.
+    -- Only a completed authentication attempt is remembered.
     saveKey(key)
 
-    setStatus("Authenticated. Key remembered.", "success")
+    setStatus("Authenticated. Loading...", "success")
 
-    task.wait(0.2)
+    task.wait(0.15)
     destroyLoader()
 
     return true
